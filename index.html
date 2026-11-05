@@ -1,0 +1,95 @@
+<!doctype html>
+<html lang="tr">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<meta name="theme-color" content="#0b1220">
+<title>SHT30 • BLE Termometre</title>
+<style>
+:root{color-scheme:dark;font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;background:#0b1220;color:#eff6ff}
+*{box-sizing:border-box}body{margin:0;min-height:100vh;background:radial-gradient(circle at 90% 0%,#173056 0%,transparent 45%),#0b1220}
+main{max-width:580px;margin:auto;padding:25px 18px 40px}.eyebrow{font-size:12px;letter-spacing:.14em;text-transform:uppercase;color:#8faac8;font-weight:700}h1{font-size:27px;margin:7px 0 8px}p{margin:0;color:#9ab0cc;line-height:1.55}.status{display:flex;align-items:center;gap:9px;border:1px solid #2b3b51;background:#142239;border-radius:13px;padding:11px 13px;margin:22px 0 15px;font-size:14px}.dot{height:9px;width:9px;flex:0 0 9px;border-radius:50%;background:#64748b}.dot.live{background:#34d399;box-shadow:0 0 0 5px #34d39919}.actions{display:flex;gap:10px;margin-bottom:20px}.btn{flex:1;border:0;border-radius:13px;padding:14px 10px;font-size:16px;font-weight:700;background:#49a8ff;color:#04101f;cursor:pointer}.btn.secondary{background:#24374e;color:#c9d8ed}.btn:disabled{opacity:.45;cursor:default}.readings{display:grid;grid-template-columns:1fr 1fr;gap:12px}.reading{background:#142239;border:1px solid #2a3a51;border-radius:20px;padding:20px 16px;min-width:0}.reading .label{font-size:13px;color:#9bb3cc}.value{margin:14px 0 7px;font-size:clamp(35px,9vw,51px);font-weight:750;letter-spacing:-.06em;font-variant-numeric:tabular-nums;white-space:nowrap}.unit{font-size:18px;letter-spacing:0;color:#9bb3cc}.hint{font-size:12px;color:#7890aa}.section{margin-top:19px;border:1px solid #2a3a51;border-radius:17px;background:#111e31;padding:16px}.sectionhead{display:flex;align-items:center;justify-content:space-between;margin-bottom:12px;font-weight:650}#plot{width:100%;height:150px;display:block}.meta{display:grid;grid-template-columns:1fr auto;gap:10px;font-size:13px;margin-top:8px;color:#9bb3cc}.meta strong{color:#e7f1ff;font-weight:600}.console{margin-top:15px;color:#a1b8d2;font-size:12px;overflow-wrap:anywhere;min-height:28px;line-height:1.5}.foot{font-size:12px;margin-top:18px;color:#7d97b5}code{color:#dbeafe}
+</style>
+</head>
+<body>
+<main>
+  <div class="eyebrow">ESP32-C3 · SHT30 · Beacio</div>
+  <h1>Sıcaklık ve nem</h1>
+  <p>iPhone Safari üzerinden doğrudan Bluetooth Low Energy ölçümleri.</p>
+  <div class="status"><span class="dot" id="dot"></span><span id="status" role="status" aria-live="polite">Bağlantı bekleniyor</span></div>
+  <div class="actions"><button class="btn" id="connect">Bluetooth'a bağlan</button><button class="btn secondary" id="disconnect" disabled>Bağlantıyı kes</button></div>
+  <div class="readings">
+    <div class="reading"><div class="label">Sıcaklık</div><div class="value"><span id="temp">--.-</span><span class="unit"> °C</span></div><div class="hint">SHT30 sensörü</div></div>
+    <div class="reading"><div class="label">Bağıl nem</div><div class="value"><span id="humid">--.-</span><span class="unit"> %</span></div><div class="hint">RH ölçümü</div></div>
+  </div>
+  <div class="section"><div class="sectionhead"><span>Sıcaklık geçmişi</span><span style="font-size:12px;color:#89a7c8">Son 60 ölçüm</span></div><canvas id="plot" aria-label="Sıcaklık eğilim grafiği"></canvas><div class="meta"><span>Son ölçüm</span><strong id="stamp">Henüz veri yok</strong><span>Alınan ölçüm</span><strong id="count">0</strong><span>BLE cihazı</span><strong id="device">SHT30-C3</strong></div></div>
+  <div class="console" id="log" aria-live="polite"></div>
+  <p class="foot">Beacio eklentisi etkin olmalı. Bu sayfa HTTPS üzerinden açılmalıdır. BLE servisi: <code>181A</code>. Ölçümler cihazdan yaklaşık 2 saniyede bir gelir.</p>
+</main>
+<script>
+'use strict';
+const SERVICE = 0x181A;
+const DATA = '7e2a0001-83f6-4b71-9c43-123456789abc';
+const $ = id => document.getElementById(id);
+let device = null, characteristic = null, busy = false, count = 0;
+const history = [];
+function status(message, live=false){ $('status').textContent=message; $('dot').classList.toggle('live',live); $('connect').disabled=busy||live; $('disconnect').disabled=!live; }
+function log(message){ $('log').textContent=message; }
+function decoded(view){ return new TextDecoder('utf-8').decode(new Uint8Array(view.buffer, view.byteOffset, view.byteLength)); }
+function parseAndShow(view){
+  const text=decoded(view);
+  const m=/T=\s*(-?\d+(?:\.\d+)?)\s*;\s*H=\s*(-?\d+(?:\.\d+)?)/i.exec(text);
+  if(!m){log('Beklenmeyen veri: '+text);return;}
+  const t=Number(m[1]),h=Number(m[2]);
+  if(!Number.isFinite(t)||!Number.isFinite(h))return;
+  $('temp').textContent=t.toFixed(1);
+  $('humid').textContent=h.toFixed(1);
+  $('stamp').textContent=new Date().toLocaleTimeString('tr-TR');
+  $('count').textContent=String(++count);
+  history.push(t);if(history.length>60)history.shift();draw();log('Son BLE verisi: '+text);
+}
+function notify(event){parseAndShow(event.target.value);}
+function disconnected(){
+  if(characteristic){try{characteristic.removeEventListener('characteristicvaluechanged',notify);}catch(e){}}
+  characteristic=null;busy=false;status('Bağlantı kesildi');log('Tekrar bağlanmak için Bluetooth’a bağlan düğmesine dokun.');
+}
+async function connect(){
+  if(!window.isSecureContext){log('Web Bluetooth için HTTPS adresinden açın.');return;}
+  if(!navigator.bluetooth){log('Web Bluetooth bulunamadı. Safari’de Beacio eklentisini etkinleştirin ve site iznini verin.');return;}
+  busy=true;status('Cihaz aranıyor…');$('connect').disabled=true;
+  try{
+    // User gesture starts the Bluetooth chooser.
+    device=await navigator.bluetooth.requestDevice({filters:[{name:'SHT30-C3'}],optionalServices:[SERVICE]});
+    device.addEventListener('gattserverdisconnected',disconnected);
+    $('device').textContent=device.name||'SHT30-C3';
+    status('Bağlantı kuruluyor…');
+    const server=await device.gatt.connect();
+    const service=await server.getPrimaryService(SERVICE);
+    characteristic=await service.getCharacteristic(DATA);
+    characteristic.addEventListener('characteristicvaluechanged',notify);
+    await characteristic.startNotifications();
+    try {parseAndShow(await characteristic.readValue());}catch(err){log('İlk veri bekleniyor: '+err.message);}
+    busy=false;status('Bağlı · Canlı ölçüm',true);
+  }catch(err){busy=false;status('Bağlantı bekleniyor');log('BLE bağlantısı: '+(err?.message||String(err)));}
+}
+function disconnect(){if(device?.gatt?.connected)device.gatt.disconnect();else disconnected();}
+function draw(){
+ const canvas=$('plot'),r=canvas.getBoundingClientRect(),ratio=window.devicePixelRatio||1;
+ canvas.width=Math.max(1,Math.round(r.width*ratio));canvas.height=Math.max(1,Math.round(r.height*ratio));
+ const ctx=canvas.getContext('2d');ctx.scale(ratio,ratio);const w=r.width,hh=r.height;
+ ctx.clearRect(0,0,w,hh);ctx.strokeStyle='#2d4764';ctx.lineWidth=1;
+ for(let i=0;i<4;i++){let y=10+i*(hh-20)/3;ctx.beginPath();ctx.moveTo(0,y);ctx.lineTo(w,y);ctx.stroke();}
+ if(!history.length)return;
+ const min=Math.min(...history),max=Math.max(...history),padding=Math.max(0.4,(max-min)*0.3),lo=min-padding,hi=max+padding;
+ ctx.strokeStyle='#58b8ff';ctx.lineWidth=2.5;ctx.lineJoin='round';ctx.beginPath();
+ history.forEach((v,i)=>{let x=history.length===1?w/2:(i/(history.length-1))*(w-4)+2;let y=10+(hi-v)/(hi-lo)*(hh-20);if(i===0)ctx.moveTo(x,y);else ctx.lineTo(x,y);});ctx.stroke();
+ ctx.fillStyle='#b8c9df';ctx.font='11px -apple-system,sans-serif';ctx.fillText(max.toFixed(1)+'°',6,12);ctx.fillText(min.toFixed(1)+'°',6,hh-3);
+}
+$('connect').addEventListener('click',connect);
+$('disconnect').addEventListener('click',disconnect);
+window.addEventListener('resize',draw);draw();
+if(!window.isSecureContext)log('Bu sayfayı HTTPS üzerinde yayınlayın; file:// ile bağlantı garanti edilmez.');
+else if(!navigator.bluetooth)log('Beacio eklentisini Safari’de etkinleştirip site izni verin.');
+</script>
+</body>
+</html>
